@@ -1,103 +1,203 @@
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_err.h"
-#include "driver/spi_master.h"
 #include "driver/gpio.h"
 #include "lora_sync.h"
+#include "lora.h"
 
 // ---------------------------------------------------------
-// Pin Definitions for ESP32-C3 Mini to LoRa Module
+// Logic I/O: Button (Master) and LED (Slave / Master local)
 // ---------------------------------------------------------
-#define LORA_SCK_PIN  4
-#define LORA_MISO_PIN 5
-#define LORA_MOSI_PIN 6
-#define LORA_CS_PIN   7
-#define LORA_RST_PIN  8
-#define LORA_DIO0_PIN 10
+#define BUTTON_PIN     2   // Input with internal pull-up (active LOW)
+#define LED_PIN        3   // Output
 
-
-// Este define servira para definir si el codigo es un MASTER o un SLAVE, dependiendo de esto se ejecutara el codigo correspondiente
+// ---------------------------------------------------------
 // MASTER = 1, SLAVE = 0
-#define MASTER_MODE 1
+// ---------------------------------------------------------
+#define MASTER_MODE    1
 
-// Global handle for the SPI device
-spi_device_handle_t lora_spi;
-
-/**
- * @brief En esta configuración, se inicializa el bus SPI para comunicarse con el módulo LoRa, se configuran los pines necesarios (SCK, MISO, MOSI, CS, RST y DIO0) 
- */
-void pinConfig(void)
+// ---------------------------------------------------------
+// GPIO Initialization (button + LED only; SPI & LoRa pins
+// are handled by the nopnop2002 lora component via Kconfig)
+// ---------------------------------------------------------
+static void gpio_init(void)
 {
-        // 1. Configure the SPI bus
-        spi_bus_config_t buscfg = {
-            .miso_io_num = LORA_MISO_PIN,
-            .mosi_io_num = LORA_MOSI_PIN,
-            .sclk_io_num = LORA_SCK_PIN,
-            .quadwp_io_num = -1,
-            .quadhd_io_num = -1,
-            .max_transfer_sz = 0
-        };
+    // --- Button pin (input with pull-up, active LOW) ---
+    gpio_config_t btn_conf = {
+        .intr_type    = GPIO_INTR_DISABLE,
+        .mode         = GPIO_MODE_INPUT,
+        .pin_bit_mask = (1ULL << BUTTON_PIN),
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&btn_conf));
 
-        // Initialize the SPI bus (ESP32-C3 uses SPI2_HOST for general SPI)
-        ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
+    // --- LED pin (output, initially off) ---
+    gpio_config_t led_conf = {
+        .intr_type    = GPIO_INTR_DISABLE,
+        .mode         = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = (1ULL << LED_PIN),
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&led_conf));
+    gpio_set_level(LED_PIN, 0);
 
-        // 2. Configure the SPI device (The LoRa module)
-        spi_device_interface_config_t devcfg = {
-            .clock_speed_hz = 1000000,
-            .mode = 0,
-            .spics_io_num = LORA_CS_PIN,
-            .queue_size = 1
-        };
-
-        // Attach the LoRa module to the SPI bus
-        ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &devcfg, &lora_spi));
-
-        // 3. Configure the LoRa Reset (RST) pin as an output
-        gpio_config_t rst_conf = {
-            .intr_type = GPIO_INTR_DISABLE,
-            .mode = GPIO_MODE_OUTPUT,
-            .pin_bit_mask = (1ULL << LORA_RST_PIN),
-            .pull_down_en = 0,
-            .pull_up_en = 0
-        };
-        gpio_config(&rst_conf);
-
-        // 4. Configure the DIO0 pin as an input with a rising edge interrupt
-        gpio_config_t dio0_conf = {
-            .intr_type = GPIO_INTR_POSEDGE, // Trigger interrupt on rising edge
-            .mode = GPIO_MODE_INPUT,
-            .pin_bit_mask = (1ULL << LORA_DIO0_PIN),
-            .pull_down_en = 1,              // Pull down to avoid false triggers
-            .pull_up_en = 0
-        };
-        gpio_config(&dio0_conf);
-
-        // Turn the LoRa module on (Take it out of reset state)
-        gpio_set_level(LORA_RST_PIN, 1);
-        printf("[lora_sync] SPI bus and GPIO pins configured for LoRa module\n");
+    printf("[lora_sync] Button (GPIO %d) and LED (GPIO %d) configured\n", BUTTON_PIN, LED_PIN);
 }
 
+// =================================================================
+// MASTER: mide duración de pulsación del botón y la envía por LoRa
+// =================================================================
+#if MASTER_MODE == 1
 
+static void master_loop(void)
+{
+    bool       last_button  = true;   // pull-up → idle HIGH
+    bool       led_active   = false;
+    TickType_t press_tick   = 0;
+    TickType_t led_on_tick  = 0;
+    uint32_t   led_dur_ms   = 0;
 
+    printf("[MASTER] Listo. Mantené pulsado el botón en GPIO %d...\n", BUTTON_PIN);
 
+    while (1) {
+        bool current_button = (bool)gpio_get_level(BUTTON_PIN);
 
+        // --- Botón recién presionado (HIGH → LOW) ---
+        if (last_button && !current_button) {
+            press_tick = xTaskGetTickCount();
+            printf("[MASTER] Botón presionado. Contando tiempo...\n");
+            vTaskDelay(pdMS_TO_TICKS(50)); // anti-rebote
+        }
+
+        // --- Botón recién soltado (LOW → HIGH) ---
+        if (!last_button && current_button) {
+            uint32_t held_ms = (uint32_t)((xTaskGetTickCount() - press_tick) * portTICK_PERIOD_MS);
+
+            printf("[MASTER] Sending beacon... duración: %lu ms\n", (unsigned long)held_ms);
+
+            // Enviar como texto ASCII (igual que el Arduino original)
+            char buf[12];
+            snprintf(buf, sizeof(buf), "%lu", (unsigned long)held_ms);
+
+            lora_send_packet((uint8_t *)buf, (int)strlen(buf));
+
+            printf("[MASTER] Paquete enviado OK\n");
+
+            // Encender LED local por la misma duración
+            if (held_ms > 0) {
+                gpio_set_level(LED_PIN, 1);
+                led_active  = true;
+                led_on_tick = xTaskGetTickCount();
+                led_dur_ms  = held_ms;
+            }
+
+            // Volver a modo recepción (por si se quiere escuchar ACKs a futuro)
+            lora_receive();
+
+            vTaskDelay(pdMS_TO_TICKS(50)); // anti-rebote
+        }
+
+        // --- Apagar LED local cuando venza el tiempo ---
+        if (led_active) {
+            uint32_t elapsed = (uint32_t)((xTaskGetTickCount() - led_on_tick) * portTICK_PERIOD_MS);
+            if (elapsed >= led_dur_ms) {
+                gpio_set_level(LED_PIN, 0);
+                led_active = false;
+            }
+        }
+
+        last_button = current_button;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+#else
+// =================================================================
+// SLAVE: escucha paquetes LoRa y enciende el LED por la duración recibida
+// =================================================================
+
+static void slave_loop(void)
+{
+    bool       led_active   = false;
+    TickType_t led_on_tick  = 0;
+    uint32_t   led_dur_ms   = 0;
+
+    printf("[SLAVE] Esperando paquetes LoRa...\n");
+    lora_receive();
+
+    while (1) {
+        // Verificar si se recibió un paquete
+        if (lora_received()) {
+            uint8_t buf[16] = { 0 };
+            int len = lora_receive_packet(buf, sizeof(buf) - 1);
+
+            if (len > 0) {
+                buf[len] = '\0';
+                int rssi = lora_packet_rssi();
+                printf("[SLAVE] Sync received – duración: '%s' ms  RSSI: %d\n", (char *)buf, rssi);
+
+                uint32_t duration = (uint32_t)strtoul((char *)buf, NULL, 10);
+
+                if (duration > 0) {
+                    gpio_set_level(LED_PIN, 1);
+                    led_active  = true;
+                    led_on_tick = xTaskGetTickCount();
+                    led_dur_ms  = duration;
+                }
+            }
+
+            // Volver a modo recepción para el siguiente paquete
+            lora_receive();
+        }
+
+        // --- Apagar LED cuando venza el tiempo ---
+        if (led_active) {
+            uint32_t elapsed = (uint32_t)((xTaskGetTickCount() - led_on_tick) * portTICK_PERIOD_MS);
+            if (elapsed >= led_dur_ms) {
+                gpio_set_level(LED_PIN, 0);
+                led_active = false;
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+#endif // MASTER_MODE
+
+// =================================================================
+// FreeRTOS Task Entry Point
+// =================================================================
 
 void lora_sync_task(void *pvParameters)
 {
     (void)pvParameters;
 
-    printf("[lora_sync] Initializing SPI for LoRa transceiver...\n");
-    pinConfig(); // Inicializo SPI y GPIOs para el módulo LoRa
-    printf("[lora_sync] SPI and GPIO initialization complete!\n");
+    printf("[lora_sync] Initializing GPIOs...\n");
+    gpio_init();
 
-    // ---------------------------------------------------------
-    // Main RTOS Loop
-    // ---------------------------------------------------------
-    while (1) {
-        printf("[lora_sync] Handling LoRa transceiver traffic and RTC synchronization\n");
-        
-        // Short delay to keep the task responsive and latency low
-        vTaskDelay(pdMS_TO_TICKS(100));
+    // lora_init() configura SPI y el módulo SX127x internamente
+    // Los pines se configuran via menuconfig (idf.py menuconfig → LoRa Configuration)
+    if (lora_init() == 0) {
+        printf("[lora_sync] ERROR: No se pudo inicializar el módulo LoRa. Abortando tarea.\n");
+        vTaskDelete(NULL);
+        return;
     }
+
+    lora_set_frequency(433E6);
+    lora_enable_crc();
+    printf("[lora_sync] Módulo LoRa inicializado correctamente (433 MHz)\n");
+
+#if MASTER_MODE == 1
+    printf("[lora_sync] Modo: MASTER\n");
+    master_loop();
+#else
+    printf("[lora_sync] Modo: SLAVE\n");
+    slave_loop();
+#endif
 }

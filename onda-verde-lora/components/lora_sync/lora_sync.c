@@ -7,6 +7,7 @@
 #include "driver/gpio.h"
 #include "lora_sync.h"
 #include "lora.h"
+#include "web_dashboard.h"
 
 // ---------------------------------------------------------
 // Logic I/O: Button (Master) and LED (Slave / Master local)
@@ -70,6 +71,7 @@ static void master_loop(void)
         // --- Botón recién presionado (HIGH → LOW) ---
         if (last_button && !current_button) {
             press_tick = xTaskGetTickCount();
+            snprintf(system_state, sizeof(system_state), "BUTTON PRESSED");
             printf("[MASTER] Botón presionado. Contando tiempo...\n");
             vTaskDelay(pdMS_TO_TICKS(50)); // anti-rebote
         }
@@ -87,6 +89,12 @@ static void master_loop(void)
             lora_send_packet((uint8_t *)buf, (int)strlen(buf));
 
             printf("[MASTER] Paquete enviado OK\n");
+
+            // Actualizar variables del dashboard
+            last_beacon_duration_ms = (int)held_ms;
+            last_rssi = lora_packet_rssi();
+            packet_counter++;
+            snprintf(system_state, sizeof(system_state), "BEACON SENT");
 
             // Encender LED local por la misma duración
             if (held_ms > 0) {
@@ -108,6 +116,7 @@ static void master_loop(void)
             if (elapsed >= led_dur_ms) {
                 gpio_set_level(LED_PIN, 0);
                 led_active = false;
+                snprintf(system_state, sizeof(system_state), "IDLE");
             }
         }
 

@@ -18,7 +18,7 @@
 // ---------------------------------------------------------
 // MASTER = 1, SLAVE = 0
 // ---------------------------------------------------------
-#define MASTER_MODE    1
+#define MASTER_MODE  1
 
 // ---------------------------------------------------------
 // GPIO Initialization (button + LED only; SPI & LoRa pins
@@ -151,8 +151,11 @@ static void slave_loop(void)
                 printf("[SLAVE] Sync received – duración: '%s' ms  RSSI: %d\n", (char *)buf, rssi);
 
                 uint32_t duration = (uint32_t)strtoul((char *)buf, NULL, 10);
-
+                last_rssi = rssi;
+                last_beacon_duration_ms = (int)duration;
+                packet_counter++;
                 if (duration > 0) {
+                    snprintf(system_state, sizeof(system_state), "LED ON");
                     gpio_set_level(LED_PIN, 1);
                     led_active  = true;
                     led_on_tick = xTaskGetTickCount();
@@ -167,6 +170,7 @@ static void slave_loop(void)
         // --- Apagar LED cuando venza el tiempo ---
         if (led_active) {
             uint32_t elapsed = (uint32_t)((xTaskGetTickCount() - led_on_tick) * portTICK_PERIOD_MS);
+            snprintf(system_state, sizeof(system_state), "LED OFF");
             if (elapsed >= led_dur_ms) {
                 gpio_set_level(LED_PIN, 0);
                 led_active = false;

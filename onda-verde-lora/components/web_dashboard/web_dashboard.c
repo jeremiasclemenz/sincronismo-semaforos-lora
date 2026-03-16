@@ -129,7 +129,12 @@ static void wifi_init_ap(void)
 
     wifi_config_t wifi_config = {
         .ap = {
-            .ssid           = "LoRa-Sync-AP",
+        #if MASTER_MODE == 1 
+            .ssid           = "LoRa-Sync-AP Master",
+        #endif
+        #if MASTER_MODE == 0
+            .ssid           = "LoRa-Sync-AP Slave",
+        #endif
             .ssid_len       = 0,
             .password       = "12345678",
             .channel        = 1,
@@ -142,7 +147,11 @@ static void wifi_init_ap(void)
     esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
     esp_wifi_start();
 
-    printf("[web_dashboard] WiFi AP iniciado – SSID: LoRa-Sync-AP  Pass: 12345678\n");
+    #if MASTER_MODE == 1
+        printf("[web_dashboard] WiFi AP iniciado – SSID: LoRa-Sync-AP Master   Pass: 12345678\n");
+    #else
+        printf("[web_dashboard] WiFi AP iniciado – SSID: LoRa-Sync-AP Slave   Pass: 12345678\n");
+    #endif
 }
 
 // -------------------------------------------------------

@@ -3,6 +3,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "app_config.h"
 
 #define WEB_DASHBOARD_TASK_NAME "web_dashboard_task"
 #define WEB_DASHBOARD_TASK_STACK_SIZE 8192

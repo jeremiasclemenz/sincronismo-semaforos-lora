@@ -2,11 +2,14 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "esp_err.h"
 #include "esp_wifi.h"
-#include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_log.h"
 #include "esp_http_server.h"
-#include "nvs_flash.h"
+
+static const char *TAG = "web_dashboard";
+static char ap_ip_str[16] = "192.168.4.1";
 
 // -------------------------------------------------------
 // Variables globales compartidas con lora_sync_task
@@ -87,8 +90,9 @@ static httpd_handle_t start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     httpd_handle_t server = NULL;
+    esp_err_t err = httpd_start(&server, &config);
 
-    if (httpd_start(&server, &config) == ESP_OK) {
+    if (err == ESP_OK) {
         httpd_uri_t root = {
             .uri     = "/",
             .method  = HTTP_GET,
@@ -103,7 +107,9 @@ static httpd_handle_t start_webserver(void)
         };
         httpd_register_uri_handler(server, &data);
 
-        printf("[web_dashboard] Servidor HTTP iniciado en http://192.168.4.1\n");
+        ESP_LOGI(TAG, "Servidor HTTP iniciado en http://%s", ap_ip_str);
+    } else {
+        ESP_LOGE(TAG, "httpd_start fallo: %s", esp_err_to_name(err));
     }
     return server;
 }
@@ -111,47 +117,75 @@ static httpd_handle_t start_webserver(void)
 // -------------------------------------------------------
 // Inicializar WiFi en modo Access Point
 // -------------------------------------------------------
-static void wifi_init_ap(void)
+static esp_err_t wifi_init_ap(const app_config_t *app_config)
 {
-    // NVS requerido por el driver WiFi
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_flash_init();
-    }
+    const bool is_master = app_config_is_master(app_config);
+    const char *ssid = is_master ? "LoRa-Sync-AP-Master" : "LoRa-Sync-AP-Slave";
 
-    esp_netif_init();
-    esp_event_loop_create_default();
+    // esp_netif_init() y esp_event_loop_create_default() ya se llamaron en app_main
     esp_netif_create_default_wifi_ap();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
+    esp_err_t err = esp_wifi_init(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_init falló: %s", esp_err_to_name(err));
+        return err;
+    }
 
-    wifi_config_t wifi_config = {
-        .ap = {
-        #if MASTER_MODE == 1 
-            .ssid           = "LoRa-Sync-AP Master",
-        #endif
-        #if MASTER_MODE == 0
-            .ssid           = "LoRa-Sync-AP Slave",
-        #endif
-            .ssid_len       = 0,
-            .password       = "12345678",
-            .channel        = 1,
-            .max_connection = 4,
-            .authmode       = WIFI_AUTH_WPA2_PSK,
-        },
-    };
+    wifi_config_t wifi_config = { 0 };
+    snprintf((char *)wifi_config.ap.ssid, sizeof(wifi_config.ap.ssid), "%s", ssid);
+    if(is_master){
+        snprintf((char *)wifi_config.ap.password, sizeof(wifi_config.ap.password), "%s", "12345678");
+    }else{
+        snprintf((char *)wifi_config.ap.password, sizeof(wifi_config.ap.password), "%s", "87654321");
+    }
+    wifi_config.ap.ssid_len = strlen(ssid);
+    if(is_master){
+        wifi_config.ap.channel = 1;
+    }else{
+        wifi_config.ap.channel = 11; // Extremo de la banda
+    }
+    wifi_config.ap.max_connection = 4;
+    wifi_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    wifi_config.ap.pairwise_cipher = WIFI_CIPHER_TYPE_CCMP;
+    wifi_config.ap.pmf_cfg.capable = true;
+    wifi_config.ap.pmf_cfg.required = false;
 
-    esp_wifi_set_mode(WIFI_MODE_AP);
-    esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
-    esp_wifi_start();
+    err = esp_wifi_set_mode(WIFI_MODE_AP);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_mode(AP) falló: %s", esp_err_to_name(err));
+        return err;
+    }
 
-    #if MASTER_MODE == 1
-        printf("[web_dashboard] WiFi AP iniciado – SSID: LoRa-Sync-AP Master   Pass: 12345678\n");
-    #else
-        printf("[web_dashboard] WiFi AP iniciado – SSID: LoRa-Sync-AP Slave   Pass: 12345678\n");
-    #endif
+    err = esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_config(AP) falló: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // Desactiva power-save para que el beacon del AP sea estable durante depuración.
+    err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_ps(WIFI_PS_NONE) falló: %s", esp_err_to_name(err));
+    }
+
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_start falló: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap_netif != NULL) {
+        esp_netif_ip_info_t ip_info;
+        if (esp_netif_get_ip_info(ap_netif, &ip_info) == ESP_OK) {
+            snprintf(ap_ip_str, sizeof(ap_ip_str), IPSTR, IP2STR(&ip_info.ip));
+        }
+    }
+
+    ESP_LOGI(TAG, "WiFi AP iniciado - SSID: %s  Pass: %s  Canal: %d", ssid, wifi_config.ap.password, wifi_config.ap.channel);
+    ESP_LOGI(TAG, "Conectate al AP y abre http://%s", ap_ip_str);
+    return ESP_OK;
 }
 
 // -------------------------------------------------------
@@ -159,17 +193,23 @@ static void wifi_init_ap(void)
 // -------------------------------------------------------
 void web_dashboard_task(void *pvParameters)
 {
-    (void)pvParameters;
+    const app_config_t *app_config = (const app_config_t *)pvParameters;
 
     printf("[web_dashboard] Inicializando WiFi AP...\n");
-    wifi_init_ap();
+    if (wifi_init_ap(app_config) != ESP_OK) {
+        ESP_LOGE(TAG, "No se pudo iniciar el AP WiFi. Dashboard deshabilitado.");
+        vTaskDelete(NULL);
+        return;
+    }
 
     printf("[web_dashboard] Iniciando servidor HTTP...\n");
-    start_webserver();
+    if (start_webserver() == NULL) {
+        ESP_LOGE(TAG, "No se pudo iniciar el servidor HTTP.");
+    }
 
     // La tarea se mantiene viva; los handlers HTTP corren en el
     // hilo del servidor.  El loop solo mantiene la tarea activa.
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

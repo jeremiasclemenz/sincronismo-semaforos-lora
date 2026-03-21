@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_err.h"
+#include "sdkconfig.h"
 #include "driver/gpio.h"
 #include "lora_sync.h"
 #include "lora.h"
@@ -13,12 +14,52 @@
 // Logic I/O: Button (Master) and LED (Slave / Master local)
 // ---------------------------------------------------------
 #define BUTTON_PIN     2   // Input with internal pull-up (active LOW)
-#define LED_PIN        3   // Output
+#define LED_PIN        10  // Output; must not overlap any LoRa SPI/reset pin
 
 // ---------------------------------------------------------
-// MASTER = 1, SLAVE = 0
-// ---------------------------------------------------------
-#define MASTER_MODE  1
+static bool uses_lora_pin(int pin)
+{
+    return pin == CONFIG_MISO_GPIO ||
+           pin == CONFIG_MOSI_GPIO ||
+           pin == CONFIG_SCK_GPIO  ||
+           pin == CONFIG_CS_GPIO   ||
+           pin == CONFIG_RST_GPIO;
+}
+
+static bool validate_pin_assignment(void)
+{
+    bool valid = true;
+
+    printf("[lora_sync] Pin map -> BTN=%d LED=%d | LoRa MISO=%d MOSI=%d SCK=%d CS=%d RST=%d\n",
+           BUTTON_PIN,
+           LED_PIN,
+           CONFIG_MISO_GPIO,
+           CONFIG_MOSI_GPIO,
+           CONFIG_SCK_GPIO,
+           CONFIG_CS_GPIO,
+           CONFIG_RST_GPIO);
+
+    if (BUTTON_PIN == LED_PIN) {
+        printf("[lora_sync] ERROR: BUTTON_PIN y LED_PIN no pueden ser el mismo GPIO (%d)\n", BUTTON_PIN);
+        valid = false;
+    }
+
+    if (uses_lora_pin(BUTTON_PIN)) {
+        printf("[lora_sync] ERROR: BUTTON_PIN=%d entra en conflicto con el bus LoRa\n", BUTTON_PIN);
+        valid = false;
+    }
+
+    if (uses_lora_pin(LED_PIN)) {
+        printf("[lora_sync] ERROR: LED_PIN=%d entra en conflicto con el bus LoRa\n", LED_PIN);
+        valid = false;
+    }
+
+    if (BUTTON_PIN == 2 || BUTTON_PIN == 8 || BUTTON_PIN == 9) {
+        printf("[lora_sync] WARNING: BUTTON_PIN=%d es un pin de strapping en ESP32-C3; si queda en LOW durante reset puede afectar el arranque\n", BUTTON_PIN);
+    }
+
+    return valid;
+}
 
 // ---------------------------------------------------------
 // GPIO Initialization (button + LED only; SPI & LoRa pins
@@ -49,11 +90,6 @@ static void gpio_init(void)
 
     printf("[lora_sync] Button (GPIO %d) and LED (GPIO %d) configured\n", BUTTON_PIN, LED_PIN);
 }
-
-// =================================================================
-// MASTER: mide duración de pulsación del botón y la envía por LoRa
-// =================================================================
-#if MASTER_MODE == 1
 
 static void master_loop(void)
 {
@@ -124,8 +160,6 @@ static void master_loop(void)
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
-
-#else
 // =================================================================
 // SLAVE: escucha paquetes LoRa y enciende el LED por la duración recibida
 // =================================================================
@@ -181,15 +215,20 @@ static void slave_loop(void)
     }
 }
 
-#endif // MASTER_MODE
-
 // =================================================================
 // FreeRTOS Task Entry Point
 // =================================================================
 
 void lora_sync_task(void *pvParameters)
 {
-    (void)pvParameters;
+    const app_config_t *app_config = (const app_config_t *)pvParameters;
+    bool is_master = app_config_is_master(app_config);
+
+    if (!validate_pin_assignment()) {
+        printf("[lora_sync] ERROR: corregí el mapeo de pines antes de inicializar GPIO o LoRa.\n");
+        vTaskDelete(NULL);
+        return;
+    }
 
     printf("[lora_sync] Initializing GPIOs...\n");
     gpio_init();
@@ -206,11 +245,11 @@ void lora_sync_task(void *pvParameters)
     lora_enable_crc();
     printf("[lora_sync] Módulo LoRa inicializado correctamente (433 MHz)\n");
 
-#if MASTER_MODE == 1
-    printf("[lora_sync] Modo: MASTER\n");
-    master_loop();
-#else
-    printf("[lora_sync] Modo: SLAVE\n");
-    slave_loop();
-#endif
+    if (is_master) {
+        printf("[lora_sync] Modo: MASTER\n");
+        master_loop();
+    } else {
+        printf("[lora_sync] Modo: SLAVE\n");
+        slave_loop();
+    }
 }

@@ -3,6 +3,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "app_config.h"
 
 #define LORA_SYNC_TASK_NAME "lora_sync_task"
 #define LORA_SYNC_TASK_STACK_SIZE 4096

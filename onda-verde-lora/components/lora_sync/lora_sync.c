@@ -204,10 +204,10 @@ static void slave_loop(void)
         // --- Apagar LED cuando venza el tiempo ---
         if (led_active) {
             uint32_t elapsed = (uint32_t)((xTaskGetTickCount() - led_on_tick) * portTICK_PERIOD_MS);
-            snprintf(system_state, sizeof(system_state), "LED OFF");
             if (elapsed >= led_dur_ms) {
                 gpio_set_level(LED_PIN, 0);
                 led_active = false;
+                snprintf(system_state, sizeof(system_state), "IDLE");
             }
         }
 

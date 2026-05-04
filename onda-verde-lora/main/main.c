@@ -12,8 +12,9 @@
 #include "web_dashboard.h"
 
 static app_config_t app_config = {
-    .device_mode = APP_DEVICE_MODE_SLAVE,
-    // device_mode = APP_DEVICE_MODE_MASTER,  
+    /* Elija UNO solo: */
+    .device_mode = APP_DEVICE_MODE_MASTER,
+    /* .device_mode = APP_DEVICE_MODE_SLAVE, */
 };
 
 

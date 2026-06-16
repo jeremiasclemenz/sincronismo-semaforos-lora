@@ -5,16 +5,17 @@
 #include "freertos/task.h"
 #include "app_config.h"
 
-#define WEB_DASHBOARD_TASK_NAME "web_dashboard_task"
-#define WEB_DASHBOARD_TASK_STACK_SIZE 8192
-#define WEB_DASHBOARD_TASK_PRIORITY 1
+#define WEB_DASHBOARD_TASK_NAME       "web_dashboard_task"
+#define WEB_DASHBOARD_TASK_STACK_SIZE  8192
+#define WEB_DASHBOARD_TASK_PRIORITY    1
 
-// Variables compartidas entre lora_sync y web_dashboard
-extern int  last_rssi;
-extern int  packet_counter;
-extern int  last_beacon_duration_ms;
-extern char system_state[32];
+/* ── API de escritura (llamada desde lora_sync_task) ────────────────── */
+void web_dashboard_set_rssi(int rssi);
+void web_dashboard_set_state(const char *state);
+void web_dashboard_inc_packets(void);
+void web_dashboard_set_relay_active(bool active);
 
+/* ── Tarea principal ────────────────────────────────────────────────── */
 void web_dashboard_task(void *pvParameters);
 
-#endif
+#endif /* WEB_DASHBOARD_H */

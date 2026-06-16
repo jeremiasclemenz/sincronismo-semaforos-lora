@@ -7,22 +7,24 @@
 #include "esp_event.h"
 #include "esp_err.h"
 
+#include "app_config.h"
+#include "event_log.h"
 #include "lora_sync.h"
 #include "mec_sem_interface.h"
 #include "web_dashboard.h"
 
-static app_config_t app_config = {
-    /* Elija UNO solo: */
-    .device_mode = APP_DEVICE_MODE_MASTER,
-    /* .device_mode = APP_DEVICE_MODE_SLAVE, */
-};
-
+/* ── Configuración del dispositivo ──────────────────────────────────
+ * Cambiar APP_DEVICE_MODE_MASTER → APP_DEVICE_MODE_SLAVE para el nodo Slave.
+ * El resto de los parámetros usa los valores por defecto del §8.           */
+static app_config_t app_config = APP_CONFIG_DEFAULT(APP_DEVICE_MODE_MASTER);
 
 void app_main(void)
 {
-    printf("Iniciando sistema de sincronismo de semáforos\n");
+    printf("=== Sistema de sincronismo de semáforos — LoRa Sync ===\n");
+    printf("Modo: %s\n",
+           app_config_is_master(&app_config) ? "MASTER" : "SLAVE");
 
-    // Inicialización global del sistema – solo deben llamarse UNA VEZ
+    /* ── Inicialización global (llamar UNA vez) ─────────────────── */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -32,39 +34,39 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    BaseType_t task_ok = xTaskCreate(
-        lora_sync_task,
-        LORA_SYNC_TASK_NAME,
-        LORA_SYNC_TASK_STACK_SIZE,
-        &app_config,
-        LORA_SYNC_TASK_PRIORITY,
-        NULL
-    );
-    if (task_ok != pdPASS) {
-        printf("[main] ERROR: no se pudo crear la tarea lora_sync_task\n");
+    /* ── Event log (antes de crear las tasks) ───────────────────── */
+    event_log_init();
+
+    /* ── Tasks ──────────────────────────────────────────────────── */
+    BaseType_t ok;
+
+    ok = xTaskCreate(lora_sync_task,
+                     LORA_SYNC_TASK_NAME,
+                     LORA_SYNC_TASK_STACK_SIZE,
+                     &app_config,
+                     LORA_SYNC_TASK_PRIORITY,
+                     NULL);
+    if (ok != pdPASS) {
+        printf("[main] ERROR: no se pudo crear lora_sync_task\n");
     }
 
-    task_ok = xTaskCreate(
-        web_dashboard_task,
-        WEB_DASHBOARD_TASK_NAME,
-        WEB_DASHBOARD_TASK_STACK_SIZE,
-        &app_config,
-        WEB_DASHBOARD_TASK_PRIORITY,
-        NULL
-    );
-    if (task_ok != pdPASS) {
-        printf("[main] ERROR: no se pudo crear la tarea web_dashboard_task\n");
+    ok = xTaskCreate(web_dashboard_task,
+                     WEB_DASHBOARD_TASK_NAME,
+                     WEB_DASHBOARD_TASK_STACK_SIZE,
+                     &app_config,
+                     WEB_DASHBOARD_TASK_PRIORITY,
+                     NULL);
+    if (ok != pdPASS) {
+        printf("[main] ERROR: no se pudo crear web_dashboard_task\n");
     }
 
-    task_ok = xTaskCreate(
-        mec_sem_interface_task,
-        MEC_SEM_INTERFACE_TASK_NAME,
-        MEC_SEM_INTERFACE_TASK_STACK_SIZE,
-        NULL,
-        MEC_SEM_INTERFACE_TASK_PRIORITY,
-        NULL
-    );
-    if (task_ok != pdPASS) {
-        printf("[main] ERROR: no se pudo crear la tarea mec_sem_interface_task\n");
+    ok = xTaskCreate(mec_sem_interface_task,
+                     MEC_SEM_INTERFACE_TASK_NAME,
+                     MEC_SEM_INTERFACE_TASK_STACK_SIZE,
+                     NULL,
+                     MEC_SEM_INTERFACE_TASK_PRIORITY,
+                     NULL);
+    if (ok != pdPASS) {
+        printf("[main] ERROR: no se pudo crear mec_sem_interface_task\n");
     }
 }

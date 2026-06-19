@@ -40,6 +40,35 @@ static void send_lora_frame(const app_config_t *cfg,
     lora_send_packet((uint8_t *)&f, sizeof(lora_frame_t));
 }
 
+/* ── Reconfiguración RF en caliente ─────────────────────────────────── */
+/* Compara SF/CR/TX power vigentes en cfg contra los últimos aplicados al
+ * radio; si cambiaron (editados desde el dashboard), los reaplica y
+ * actualiza el estampado RF del event_log. Solo debe llamarse desde
+ * puntos donde el radio no esté en medio de una transmisión/espera de ACK. */
+static void apply_rf_if_changed(const app_config_t *cfg,
+                                 uint8_t *applied_sf,
+                                 uint8_t *applied_cr,
+                                 uint8_t *applied_tx_power)
+{
+    if (cfg->lora_sf == *applied_sf &&
+        cfg->lora_cr == *applied_cr &&
+        cfg->lora_tx_power == *applied_tx_power) {
+        return;
+    }
+
+    lora_set_spreading_factor(cfg->lora_sf);
+    lora_set_coding_rate(cfg->lora_cr);
+    lora_set_tx_power(cfg->lora_tx_power);
+
+    *applied_sf       = cfg->lora_sf;
+    *applied_cr       = cfg->lora_cr;
+    *applied_tx_power = cfg->lora_tx_power;
+    event_log_set_rf_config(*applied_sf, *applied_cr, (int8_t)*applied_tx_power);
+
+    printf("[lora_sync] RF reconfigurado desde dashboard: SF%d CR=4/%d TX=%ddBm\n",
+           cfg->lora_sf, cfg->lora_cr + 4, cfg->lora_tx_power);
+}
+
 /* ── Recepción y validación de ACK ─────────────────────────────────── */
 /* Devuelve true si se recibió un ACK válido con la sequence esperada. */
 static bool try_receive_ack(const app_config_t *cfg, uint8_t expected_seq)
@@ -70,7 +99,8 @@ typedef enum {
     MASTER_LOCK,
 } master_state_t;
 
-static void master_loop(const app_config_t *cfg)
+static void master_loop(const app_config_t *cfg,
+                         uint8_t *applied_sf, uint8_t *applied_cr, uint8_t *applied_tx_power)
 {
     master_state_t state     = MASTER_IDLE;
     uint8_t        retries   = 0;
@@ -100,6 +130,10 @@ static void master_loop(const app_config_t *cfg)
         switch (state) {
 
         case MASTER_IDLE: {
+            /* Radio inactivo: punto seguro para aplicar cambios de SF/CR/TX
+             * power editados desde el dashboard. */
+            apply_rf_if_changed(cfg, applied_sf, applied_cr, applied_tx_power);
+
             /* Modo DEBUG: enviar CMD_DEBUG periódicamente (automático)
              * o solo cuando el usuario lo dispara desde el dashboard (manual). */
             if (cfg->debug_mode) {
@@ -210,6 +244,9 @@ static void master_loop(const app_config_t *cfg)
             break;
 
         case MASTER_LOCK: {
+            /* Radio inactivo durante el lock-out: también es un punto seguro. */
+            apply_rf_if_changed(cfg, applied_sf, applied_cr, applied_tx_power);
+
             bool still_locked = (ms_elapsed(lock_tick) < cfg->lock_timeout_ms); // lock tick tiene que ser mayor a lock timeout para salir del lock
             if (!still_locked) {
                 printf("[MASTER] Lock-out vencido. Volviendo a IDLE.\n");
@@ -234,7 +271,8 @@ typedef enum {
     SLAVE_RELAY_OFF,
 } slave_state_t;
 
-static void slave_loop(const app_config_t *cfg)
+static void slave_loop(const app_config_t *cfg,
+                        uint8_t *applied_sf, uint8_t *applied_cr, uint8_t *applied_tx_power)
 {
     slave_state_t state        = SLAVE_LISTEN;
     TickType_t    relay_tick   = 0;
@@ -248,6 +286,10 @@ static void slave_loop(const app_config_t *cfg)
         switch (state) {
 
         case SLAVE_LISTEN: {
+            /* Punto seguro entre recepciones: aplicar cambios de SF/CR/TX
+             * power editados desde el dashboard. */
+            apply_rf_if_changed(cfg, applied_sf, applied_cr, applied_tx_power);
+
             if (!lora_received()) break;
 
             uint8_t buf[sizeof(lora_frame_t)];
@@ -397,16 +439,24 @@ void lora_sync_task(void *pvParameters)
     lora_set_tx_power(cfg->lora_tx_power);
     lora_enable_crc();
 
+    /* Parámetros RF efectivamente aplicados al radio; se comparan contra
+     * cfg en cada ciclo para detectar ediciones hechas desde el dashboard
+     * (ver apply_rf_if_changed). */
+    uint8_t applied_sf       = cfg->lora_sf;
+    uint8_t applied_cr       = cfg->lora_cr;
+    uint8_t applied_tx_power = cfg->lora_tx_power;
+    event_log_set_rf_config(applied_sf, applied_cr, (int8_t)applied_tx_power);
+
     printf("[lora_sync] LoRa OK — SF%d BW_idx=%d CR=%d TX=%ddBm Freq=%ldHz\n",
            cfg->lora_sf, cfg->lora_bw, cfg->lora_cr,
            cfg->lora_tx_power, cfg->lora_frequency);
 
     if (is_master) {
         printf("[lora_sync] Modo: MASTER  id=0x%02X\n", cfg->master_id);
-        master_loop(cfg);
+        master_loop(cfg, &applied_sf, &applied_cr, &applied_tx_power);
     } else {
         printf("[lora_sync] Modo: SLAVE  esperando master_id=0x%02X\n",
                cfg->expected_master_id);
-        slave_loop(cfg);
+        slave_loop(cfg, &applied_sf, &applied_cr, &applied_tx_power);
     }
 }

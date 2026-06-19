@@ -12,13 +12,16 @@
 #define EVT_DEBUG       0x20   /* Evento generado en modo DEBUG           */
 #define EVT_BOOT        0x40   /* Arranque del sistema                    */
 
-/* ── Entrada del log (8 bytes) ──────────────────────────────────────── */
+/* ── Entrada del log ────────────────────────────────────────────────── */
 typedef struct {
-    uint32_t uptime_ms;   /* ms desde boot                    */
-    int8_t   rssi;        /* dBm (-128..+127)                 */
-    int8_t   snr_x4;      /* SNR × 4, resolución 0.25 dB     */
-    uint8_t  sequence;    /* número de secuencia del paquete  */
-    uint8_t  event;       /* flags de evento (EVT_*)          */
+    uint32_t uptime_ms;     /* ms desde boot                            */
+    int8_t   rssi;          /* dBm (-128..+127)                         */
+    int8_t   snr_x4;        /* SNR × 4, resolución 0.25 dB              */
+    uint8_t  sequence;      /* número de secuencia del paquete          */
+    uint8_t  event;         /* flags de evento (EVT_*)                  */
+    uint8_t  lora_sf;       /* Spreading Factor vigente al loggear      */
+    uint8_t  lora_cr;       /* Coding Rate vigente (1=4/5 .. 4=4/8)      */
+    int8_t   lora_tx_power; /* TX Power dBm vigente al loggear          */
 } log_entry_t;
 
 /* ── Estadísticas calculadas ────────────────────────────────────────── */
@@ -39,8 +42,14 @@ typedef struct {
  * Crea el mutex interno y registra EVT_BOOT. */
 void event_log_init(void);
 
-/* Agregar una entrada al FIFO (thread-safe). */
+/* Agregar una entrada al FIFO (thread-safe). Cada entrada queda
+ * estampada con los parámetros RF vigentes (ver event_log_set_rf_config). */
 void event_log_push(uint8_t event_flags, int8_t rssi, float snr, uint8_t seq);
+
+/* Actualizar los parámetros RF (SF/CR/TX power) que se estampan en cada
+ * entrada nueva. Llamar al inicializar el radio y cada vez que se
+ * reconfigura en caliente desde el dashboard. */
+void event_log_set_rf_config(uint8_t sf, uint8_t cr, int8_t tx_power);
 
 /* Copiar hasta `max` entradas en `out` en orden cronológico.
  * Devuelve la cantidad copiada. */

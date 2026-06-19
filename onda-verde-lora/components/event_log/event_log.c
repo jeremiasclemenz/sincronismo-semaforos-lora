@@ -13,6 +13,12 @@ static uint16_t          log_head  = 0;   /* próxima posición de escritura */
 static uint16_t          log_count = 0;   /* entradas válidas (0..LOG_SIZE) */
 static SemaphoreHandle_t log_mutex = NULL;
 
+/* Parámetros RF vigentes, estampados en cada entrada nueva (ver
+ * event_log_set_rf_config). Protegidos por log_mutex. */
+static uint8_t s_cur_sf        = 0;
+static uint8_t s_cur_cr        = 0;
+static int8_t  s_cur_tx_power  = 0;
+
 /* ── Helpers internos ───────────────────────────────────────────────── */
 
 /* Índice de la entrada más antigua en el buffer circular. */
@@ -50,11 +56,23 @@ void event_log_push(uint8_t event_flags, int8_t rssi, float snr, uint8_t seq)
     };
 
     xSemaphoreTake(log_mutex, portMAX_DELAY);
+    e.lora_sf       = s_cur_sf;
+    e.lora_cr       = s_cur_cr;
+    e.lora_tx_power = s_cur_tx_power;
     log_buf[log_head] = e;
     log_head = (log_head + 1) % LOG_SIZE;
     if (log_count < LOG_SIZE) {
         log_count++;
     }
+    xSemaphoreGive(log_mutex);
+}
+
+void event_log_set_rf_config(uint8_t sf, uint8_t cr, int8_t tx_power)
+{
+    xSemaphoreTake(log_mutex, portMAX_DELAY);
+    s_cur_sf       = sf;
+    s_cur_cr       = cr;
+    s_cur_tx_power = tx_power;
     xSemaphoreGive(log_mutex);
 }
 

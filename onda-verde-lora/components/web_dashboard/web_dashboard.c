@@ -136,10 +136,25 @@ static const char INDEX_HTML[] =
 "<span class='value' id='packets'>--</span></div>"
 "<div class='row'><span class='label'>Uptime</span>"
 "<span class='value' id='uptime'>--</span></div>"
-"<div class='row'><span class='label'>SF / BW / CR</span>"
-"<span class='value' id='rf'>--</span></div>"
+"<div class='row'><span class='label'>BW</span>"
+"<span class='value' id='bw'>--</span></div>"
+"<div class='row'><span class='label'>SF</span>"
+"<select id='cfgSf' onchange='setRf()'>"
+"<option value='9'>9</option><option value='10'>10</option>"
+"<option value='11'>11</option><option value='12'>12</option>"
+"</select></div>"
+"<div class='row'><span class='label'>CR</span>"
+"<select id='cfgCr' onchange='setRf()'>"
+"<option value='1'>4/5</option><option value='2'>4/6</option>"
+"<option value='3'>4/7</option><option value='4'>4/8</option>"
+"</select></div>"
 "<div class='row'><span class='label'>TX Power</span>"
-"<span class='value' id='txp'>--</span></div>"
+"<select id='cfgPwr' onchange='setRf()'>"
+"<option value='10'>10 dBm</option><option value='11'>11 dBm</option>"
+"<option value='12'>12 dBm</option><option value='13'>13 dBm</option>"
+"<option value='14'>14 dBm</option><option value='15'>15 dBm</option>"
+"<option value='16'>16 dBm</option><option value='17'>17 dBm</option>"
+"</select></div>"
 "<div class='row'><span class='label'>Debug mode</span>"
 "<span class='value' id='dbg'>--</span></div>"
 "<div class='row' id='rowDbgSrc' style='display:none'>"
@@ -217,9 +232,10 @@ static const char INDEX_HTML[] =
 "document.getElementById('rssi').textContent=d.rssi+' dBm';"
 "document.getElementById('packets').textContent=d.packets;"
 "document.getElementById('uptime').textContent=fmtUp(d.uptime_ms);"
-"document.getElementById('rf').textContent="
-"'SF'+d.sf+' / '+(BW[d.bw]||'?')+' kHz / 4/'+(d.cr+4);"
-"document.getElementById('txp').textContent=d.tx_power+' dBm';"
+"document.getElementById('bw').textContent=(BW[d.bw]||'?')+' kHz';"
+"if(document.activeElement.id!=='cfgSf')document.getElementById('cfgSf').value=d.sf;"
+"if(document.activeElement.id!=='cfgCr')document.getElementById('cfgCr').value=d.cr;"
+"if(document.activeElement.id!=='cfgPwr')document.getElementById('cfgPwr').value=d.tx_power;"
 "document.getElementById('dbg').textContent=d.debug_mode?'ON':'OFF';"
 "document.getElementById('rowDbgSrc').style.display=d.debug_mode?'flex':'none';"
 "document.getElementById('btnDebugSend').style.display="
@@ -248,6 +264,16 @@ static const char INDEX_HTML[] =
 /* Disparar un envío manual de CMD_DEBUG */
 "function sendDebugNow(){"
 "fetch('/debug_send',{method:'POST'}).then(up)}"
+
+/* Aplicar SF/CR/TX power elegidos en los desplegables */
+"function setRf(){"
+"fetch('/config',{method:'POST',"
+"headers:{'Content-Type':'application/json'},"
+"body:JSON.stringify({"
+"sf:parseInt(document.getElementById('cfgSf').value),"
+"cr:parseInt(document.getElementById('cfgCr').value),"
+"tx_power:parseInt(document.getElementById('cfgPwr').value)"
+"})}).then(up)}"
 "</script></body></html>";
 
 /* ── Handlers HTTP ──────────────────────────────────────────────────── */
@@ -338,11 +364,30 @@ static esp_err_t config_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* Busca "<key>":<int> en el buffer JSON y devuelve el valor en *out.
+ * Parseo mínimo (sin cJSON), consistente con el resto del handler. */
+static bool json_get_int(const char *buf, const char *key, int *out)
+{
+    char pattern[24];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    const char *p = strstr(buf, pattern);
+    if (!p) return false;
+    *out = atoi(p + strlen(pattern));
+    return true;
+}
+
+static int clampi(int v, int lo, int hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
-    /* Parseo mínimo de {"debug_mode": true/false, "debug_manual_mode": true/false}.
+    /* Parseo mínimo de JSON plano {"clave":valor,...}.
      * Una implementación completa usaría cJSON. */
-    char buf[128];
+    char buf[160];
     int  len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len > 0) {
         buf[len] = '\0';
@@ -352,6 +397,14 @@ static esp_err_t config_post_handler(httpd_req_t *req)
             if (strstr(buf, "\"debug_mode\":false")) cfg->debug_mode = false;
             if (strstr(buf, "\"debug_manual_mode\":true"))  cfg->debug_manual_mode = true;
             if (strstr(buf, "\"debug_manual_mode\":false")) cfg->debug_manual_mode = false;
+
+            /* RF: SF 9-12, CR 1-4 (4/5..4/8), TX power 10-17 dBm.
+             * Se valida/clamp aquí; lora_sync_task aplica el cambio al
+             * radio en el próximo punto seguro del loop. */
+            int v;
+            if (json_get_int(buf, "sf", &v))       cfg->lora_sf       = (uint8_t)clampi(v, 9, 12);
+            if (json_get_int(buf, "cr", &v))       cfg->lora_cr       = (uint8_t)clampi(v, 1, 4);
+            if (json_get_int(buf, "tx_power", &v)) cfg->lora_tx_power = (uint8_t)clampi(v, 10, 17);
         }
     }
     httpd_resp_set_type(req, "application/json");
@@ -409,20 +462,23 @@ static esp_err_t export_csv_handler(httpd_req_t *req)
     /* Envío chunked: el log completo (1024 × ~40 bytes) no entra en un
      * buffer único sin comprometer RAM. */
     httpd_resp_sendstr_chunk(req,
-        "uptime_ms,event,rssi_dbm,snr_db,sequence,debug\n");
+        "uptime_ms,event,rssi_dbm,snr_db,sequence,debug,sf,cr_denom,tx_power_dbm\n");
 
-    char line[80];
+    char line[96];
     for (uint16_t i = 0; i < n; i++) {
         const log_entry_t *e = &entries[i];
         /* SNR en centésimas de dB para evitar printf de float */
         int sc = (int)e->snr_x4 * 25;
-        snprintf(line, sizeof(line), "%lu,%s,%d,%s%d.%02d,%u,%u\n",
+        snprintf(line, sizeof(line), "%lu,%s,%d,%s%d.%02d,%u,%u,%u,%u,%d\n",
                  (unsigned long)e->uptime_ms,
                  evt_name(e->event),
                  (int)e->rssi,
                  (sc < 0) ? "-" : "", abs(sc) / 100, abs(sc) % 100,
                  (unsigned)e->sequence,
-                 (e->event & EVT_DEBUG) ? 1u : 0u);
+                 (e->event & EVT_DEBUG) ? 1u : 0u,
+                 (unsigned)e->lora_sf,
+                 (unsigned)e->lora_cr + 4u,
+                 (int)e->lora_tx_power);
         if (httpd_resp_sendstr_chunk(req, line) != ESP_OK) break;
     }
 

@@ -1,0 +1,3 @@
+CONFIG_IDF_TARGET="esp32c3"
+# Algunos tests esperan respuestas por radio con timeouts de varios segundos.
+CONFIG_ESP_TASK_WDT_EN=n

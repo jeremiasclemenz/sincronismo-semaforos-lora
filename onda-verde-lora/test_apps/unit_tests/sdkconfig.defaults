@@ -1,0 +1,3 @@
+CONFIG_IDF_TARGET="esp32c3"
+# Las pruebas no corren el watchdog de tareas y pueden tardar más que su período por defecto.
+CONFIG_ESP_TASK_WDT_EN=n

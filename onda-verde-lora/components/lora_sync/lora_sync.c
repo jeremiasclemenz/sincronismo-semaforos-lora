@@ -81,6 +81,7 @@ static void master_loop(const app_config_t *cfg)
     TickType_t     relay_tick = 0;     /* inicio del relé inferido en el slave */
     bool           relay_inf  = false; /* relé del slave inferido activo       */
     bool           sent_green = false; /* último frame enviado fue CMD_GREEN   */
+    bool           sent_debug_manual = false; /* último frame fue CMD_DEBUG manual (sin LOCK) */
     bool           last_gpio = false; /* pull-down externo → idle LOW */
 
     printf("[MASTER] Listo. Esperando señal en GPIO %d...\n", INPUT_220VAC_PIN);
@@ -99,12 +100,17 @@ static void master_loop(const app_config_t *cfg)
         switch (state) {
 
         case MASTER_IDLE: {
-            /* Modo DEBUG: enviar CMD_DEBUG periódicamente */
+            /* Modo DEBUG: enviar CMD_DEBUG periódicamente (automático)
+             * o solo cuando el usuario lo dispara desde el dashboard (manual). */
             if (cfg->debug_mode) {
-                if (ms_elapsed(dbg_tick) >= cfg->debug_interval_ms) {
+                bool send_debug = cfg->debug_manual_mode
+                    ? web_dashboard_consume_debug_trigger()
+                    : (ms_elapsed(dbg_tick) >= cfg->debug_interval_ms);
+                if (send_debug) {
                     sequence++;
                     printf("[MASTER][DEBUG] Enviando CMD_DEBUG seq=%u\n", sequence);
-                    sent_green = false;
+                    sent_green        = false;
+                    sent_debug_manual = cfg->debug_manual_mode;
                     send_lora_frame(cfg, CMD_DEBUG, sequence, 0);
                     lora_receive();
                     ack_tick  = xTaskGetTickCount();
@@ -133,7 +139,8 @@ static void master_loop(const app_config_t *cfg)
         case MASTER_SEND:
             sequence++;
             printf("[MASTER] Enviando CMD_GREEN seq=%u\n", sequence);
-            sent_green = true;
+            sent_green        = true;
+            sent_debug_manual = false;
             send_lora_frame(cfg, CMD_GREEN, sequence, (uint16_t)cfg->relay_duration_ms);
             lora_receive();
             ack_tick = xTaskGetTickCount();
@@ -150,7 +157,6 @@ static void master_loop(const app_config_t *cfg)
                        sequence, rssi, snr);
                 event_log_push(EVT_TX_OK, (int8_t)rssi, snr, sequence);
                 web_dashboard_set_rssi(rssi);
-                web_dashboard_set_state("LOCK");
                 /* ACK a un CMD_GREEN ⇒ el slave activó su relé: reflejarlo
                  * en el dashboard del master durante relay_duration_ms.
                  * (CMD_DEBUG también se ACKea pero no activa relé.) */
@@ -159,8 +165,15 @@ static void master_loop(const app_config_t *cfg)
                     relay_tick = xTaskGetTickCount();
                     web_dashboard_set_relay_active(true);
                 }
-                lock_tick = xTaskGetTickCount();
-                state     = MASTER_LOCK;
+                if (sent_debug_manual) {
+                    /* Debug manual: sin LOCK, listo para el próximo envío inmediato. */
+                    web_dashboard_set_state("IDLE");
+                    state = MASTER_IDLE;
+                } else {
+                    web_dashboard_set_state("LOCK");
+                    lock_tick = xTaskGetTickCount();
+                    state     = MASTER_LOCK;
+                }
             } else if (ms_elapsed(ack_tick) >= cfg->ack_timeout_ms) {
                 retries++;
                 printf("[MASTER] Timeout ACK  seq=%u  intento=%u/%u\n",
@@ -171,9 +184,14 @@ static void master_loop(const app_config_t *cfg)
                     printf("[MASTER] Sin ACK tras %u intentos — EVT_TX_LOST\n",
                            cfg->max_retries);
                     event_log_push(EVT_TX_LOST, 0, 0.0f, sequence);
-                    web_dashboard_set_state("LOCK");
-                    lock_tick = xTaskGetTickCount();
-                    state     = MASTER_LOCK;
+                    if (sent_debug_manual) {
+                        web_dashboard_set_state("IDLE");
+                        state = MASTER_IDLE;
+                    } else {
+                        web_dashboard_set_state("LOCK");
+                        lock_tick = xTaskGetTickCount();
+                        state     = MASTER_LOCK;
+                    }
                 }
             }
             break;
@@ -181,7 +199,11 @@ static void master_loop(const app_config_t *cfg)
         case MASTER_RETRY:
             printf("[MASTER] Reintento %u/%u  seq=%u\n",
                    retries, cfg->max_retries, sequence);
-            send_lora_frame(cfg, CMD_GREEN, sequence, (uint16_t)cfg->relay_duration_ms);
+            if (sent_green) {
+                send_lora_frame(cfg, CMD_GREEN, sequence, (uint16_t)cfg->relay_duration_ms);
+            } else {
+                send_lora_frame(cfg, CMD_DEBUG, sequence, 0);
+            }
             lora_receive();
             ack_tick = xTaskGetTickCount();
             state    = MASTER_WAIT_ACK;

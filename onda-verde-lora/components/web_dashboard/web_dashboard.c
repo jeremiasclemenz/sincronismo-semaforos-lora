@@ -24,6 +24,7 @@ static int   s_rssi          = 0;
 static int   s_packets       = 0;
 static bool  s_relay_active  = false;
 static char  s_state[32]     = "IDLE";
+static bool  s_debug_trigger = false; /* pedido de envío manual CMD_DEBUG, seteado por /debug_send */
 
 /* Referencia a la config para exponer parámetros RF en /data */
 static const app_config_t *s_cfg = NULL;
@@ -57,6 +58,16 @@ void web_dashboard_set_relay_active(bool active)
     if (dash_mutex) xSemaphoreTake(dash_mutex, portMAX_DELAY);
     s_relay_active = active;
     if (dash_mutex) xSemaphoreGive(dash_mutex);
+}
+
+bool web_dashboard_consume_debug_trigger(void)
+{
+    bool triggered = false;
+    if (dash_mutex) xSemaphoreTake(dash_mutex, portMAX_DELAY);
+    triggered      = s_debug_trigger;
+    s_debug_trigger = false;
+    if (dash_mutex) xSemaphoreGive(dash_mutex);
+    return triggered;
 }
 
 /* ── HTML embebido ──────────────────────────────────────────────────── */
@@ -131,10 +142,18 @@ static const char INDEX_HTML[] =
 "<span class='value' id='txp'>--</span></div>"
 "<div class='row'><span class='label'>Debug mode</span>"
 "<span class='value' id='dbg'>--</span></div>"
+"<div class='row' id='rowDbgSrc' style='display:none'>"
+"<span class='label'>Env&iacute;o debug</span>"
+"<select id='dbgSrc' onchange='setDebugSource()'>"
+"<option value='auto'>Autom&aacute;tico</option>"
+"<option value='manual'>Manual</option>"
+"</select></div>"
 
 /* Controles */
 "<div style='text-align:center;margin-top:14px'>"
 "<button onclick='toggleDebug()' id='btnDebug'>&#128295; Debug ON/OFF</button>"
+"<button onclick='sendDebugNow()' id='btnDebugSend' style='display:none'>"
+"&#128228; Enviar paquete</button>"
 "<button onclick='location.href=\"/export.csv\"'>&#128229; CSV</button>"
 "</div>"
 "</div>"
@@ -202,6 +221,11 @@ static const char INDEX_HTML[] =
 "'SF'+d.sf+' / '+(BW[d.bw]||'?')+' kHz / 4/'+(d.cr+4);"
 "document.getElementById('txp').textContent=d.tx_power+' dBm';"
 "document.getElementById('dbg').textContent=d.debug_mode?'ON':'OFF';"
+"document.getElementById('rowDbgSrc').style.display=d.debug_mode?'flex':'none';"
+"document.getElementById('btnDebugSend').style.display="
+"(d.debug_mode&&d.debug_manual_mode)?'inline-block':'none';"
+"if(document.activeElement.id!=='dbgSrc')"
+"document.getElementById('dbgSrc').value=d.debug_manual_mode?'manual':'auto';"
 "setSem(st,relay);setState(st);"
 "}).catch(function(){})}"
 "setInterval(up,1000);up();"
@@ -213,6 +237,17 @@ static const char INDEX_HTML[] =
 "headers:{'Content-Type':'application/json'},"
 "body:JSON.stringify({debug_mode:!d.debug_mode})});"
 "}).then(up)}"
+
+/* Cambiar fuente de envío debug (auto/manual) */
+"function setDebugSource(){"
+"var manual=document.getElementById('dbgSrc').value==='manual';"
+"fetch('/config',{method:'POST',"
+"headers:{'Content-Type':'application/json'},"
+"body:JSON.stringify({debug_manual_mode:manual})}).then(up)}"
+
+/* Disparar un envío manual de CMD_DEBUG */
+"function sendDebugNow(){"
+"fetch('/debug_send',{method:'POST'}).then(up)}"
 "</script></body></html>";
 
 /* ── Handlers HTTP ──────────────────────────────────────────────────── */
@@ -236,7 +271,7 @@ static esp_err_t data_handler(httpd_req_t *req)
 
     uint32_t uptime_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
 
-    char json[256];
+    char json[288];
     snprintf(json, sizeof(json),
         "{"
         "\"rssi\":%d,"
@@ -245,6 +280,7 @@ static esp_err_t data_handler(httpd_req_t *req)
         "\"uptime_ms\":%lu,"
         "\"relay_active\":%s,"
         "\"debug_mode\":%s,"
+        "\"debug_manual_mode\":%s,"
         "\"sf\":%d,"
         "\"bw\":%d,"
         "\"cr\":%d,"
@@ -254,6 +290,7 @@ static esp_err_t data_handler(httpd_req_t *req)
         (unsigned long)uptime_ms,
         relay_active ? "true" : "false",
         (s_cfg && s_cfg->debug_mode) ? "true" : "false",
+        (s_cfg && s_cfg->debug_manual_mode) ? "true" : "false",
         s_cfg ? s_cfg->lora_sf      : 9,
         s_cfg ? s_cfg->lora_bw      : 7,
         s_cfg ? s_cfg->lora_cr      : 1,
@@ -279,20 +316,22 @@ static esp_err_t sync_time_handler(httpd_req_t *req)
 
 static esp_err_t config_get_handler(httpd_req_t *req)
 {
-    char json[128];
+    char json[160];
     snprintf(json, sizeof(json),
         "{"
         "\"sf\":%d,"
         "\"bw\":%d,"
         "\"cr\":%d,"
         "\"tx_power\":%d,"
-        "\"debug_mode\":%s"
+        "\"debug_mode\":%s,"
+        "\"debug_manual_mode\":%s"
         "}",
         s_cfg ? s_cfg->lora_sf      : 9,
         s_cfg ? s_cfg->lora_bw      : 7,
         s_cfg ? s_cfg->lora_cr      : 1,
         s_cfg ? s_cfg->lora_tx_power : 17,
-        (s_cfg && s_cfg->debug_mode) ? "true" : "false");
+        (s_cfg && s_cfg->debug_mode) ? "true" : "false",
+        (s_cfg && s_cfg->debug_manual_mode) ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
@@ -301,7 +340,7 @@ static esp_err_t config_get_handler(httpd_req_t *req)
 
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
-    /* Parseo mínimo de {"debug_mode": true/false}.
+    /* Parseo mínimo de {"debug_mode": true/false, "debug_manual_mode": true/false}.
      * Una implementación completa usaría cJSON. */
     char buf[128];
     int  len = httpd_req_recv(req, buf, sizeof(buf) - 1);
@@ -311,8 +350,24 @@ static esp_err_t config_post_handler(httpd_req_t *req)
             app_config_t *cfg = (app_config_t *)s_cfg; /* cast para modificar */
             if (strstr(buf, "\"debug_mode\":true"))  cfg->debug_mode = true;
             if (strstr(buf, "\"debug_mode\":false")) cfg->debug_mode = false;
+            if (strstr(buf, "\"debug_manual_mode\":true"))  cfg->debug_manual_mode = true;
+            if (strstr(buf, "\"debug_manual_mode\":false")) cfg->debug_manual_mode = false;
         }
     }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+static esp_err_t debug_send_handler(httpd_req_t *req)
+{
+    /* Pide a lora_sync_task que envíe un CMD_DEBUG en el próximo ciclo
+     * de MASTER_IDLE. Solo tiene efecto si debug_mode y debug_manual_mode
+     * están activos; de lo contrario lora_sync lo ignora. */
+    if (dash_mutex) xSemaphoreTake(dash_mutex, portMAX_DELAY);
+    s_debug_trigger = true;
+    if (dash_mutex) xSemaphoreGive(dash_mutex);
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -395,6 +450,7 @@ static httpd_handle_t start_webserver(void)
         { .uri = "/config",    .method = HTTP_POST, .handler = config_post_handler },
         { .uri = "/sync_time", .method = HTTP_POST, .handler = sync_time_handler   },
         { .uri = "/export.csv", .method = HTTP_GET, .handler = export_csv_handler  },
+        { .uri = "/debug_send", .method = HTTP_POST, .handler = debug_send_handler },
     };
 
     for (int i = 0; i < (int)(sizeof(uris) / sizeof(uris[0])); i++) {

@@ -50,7 +50,8 @@ typedef struct {
 
     /* Funcionalidades */
     bool     debug_mode;        /* modo debug activo */
-    uint32_t debug_interval_ms; /* intervalo paquete CMD_DEBUG */
+    uint32_t debug_interval_ms; /* intervalo paquete CMD_DEBUG (modo automático) */
+    bool     debug_manual_mode; /* true = envío manual desde dashboard; false = automático por intervalo */
 } app_config_t;
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
@@ -77,6 +78,7 @@ static inline bool app_config_is_master(const app_config_t *config)
     .expected_master_id = APP_CFG_EXPECTED_MASTER_ID,          \
     .debug_mode         = false,                               \
     .debug_interval_ms  = APP_CFG_DEBUG_INTERVAL_MS,           \
+    .debug_manual_mode  = false,                               \
 }
 
 #endif /* APP_CONFIG_H */

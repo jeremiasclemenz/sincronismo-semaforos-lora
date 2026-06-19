@@ -15,6 +15,11 @@ void web_dashboard_set_state(const char *state);
 void web_dashboard_inc_packets(void);
 void web_dashboard_set_relay_active(bool active);
 
+/* ── API de lectura (llamada desde lora_sync_task) ───────────────────── */
+/* Consume (lee y limpia) el pedido de envío manual de CMD_DEBUG hecho
+ * desde el dashboard. Devuelve true una sola vez por click del usuario. */
+bool web_dashboard_consume_debug_trigger(void);
+
 /* ── Tarea principal ────────────────────────────────────────────────── */
 void web_dashboard_task(void *pvParameters);
 

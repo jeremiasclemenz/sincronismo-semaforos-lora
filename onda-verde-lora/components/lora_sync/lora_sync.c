@@ -24,12 +24,48 @@ static inline uint32_t ms_elapsed(TickType_t since)
     return (uint32_t)((xTaskGetTickCount() - since) * portTICK_PERIOD_MS);
 }
 
+/* ── Recuperación del chip antes de transmitir ─────────────────────── */
+/* Una falla aislada del chip LoRa (brown-out por TX a alta potencia, glitch
+ * de SPI) lo deja mudo hasta el próximo reset; sin un punto de recuperación
+ * activo antes de cada envío, la comunicación queda muerta para siempre.
+ * Se llama justo antes de cada lora_send_packet(), tanto en master como en
+ * slave. lora_recover() resetea el chip y reaplica los registros por
+ * defecto del driver (no toca el bus SPI); aquí reaplicamos encima los
+ * parámetros de aplicación que lora_init() no vuelve a configurar. Si
+ * lora_recover() falla se loguea el fallo pero se intenta igual el envío,
+ * para que quede registrado en el event_log. */
+static void lora_reinit_for_tx(const app_config_t *cfg,
+                                const uint8_t *applied_sf,
+                                const uint8_t *applied_cr,
+                                const uint8_t *applied_tx_power)
+{
+    if (lora_recover()) {
+        lora_set_frequency(cfg->lora_frequency);
+        lora_set_spreading_factor(*applied_sf);
+        lora_set_bandwidth(cfg->lora_bw);
+        lora_set_coding_rate(*applied_cr);
+        lora_set_tx_power(*applied_tx_power);
+        lora_enable_crc();
+        web_dashboard_set_lora_diag(true, lora_get_version(), lora_get_op_mode());
+    } else {
+        printf("[lora_sync] WARNING: lora_recover() falló — chip LoRa no responde, "
+               "se intenta el envío igual\n");
+        event_log_push(EVT_LORA_FAIL, 0, 0.0f, 0);
+        web_dashboard_set_lora_diag(false, 0, 0);
+    }
+}
+
 /* ── Envío de frame LoRa ────────────────────────────────────────────── */
 static void send_lora_frame(const app_config_t *cfg,
                              uint8_t command,
                              uint8_t sequence,
-                             uint16_t relay_ms)
+                             uint16_t relay_ms,
+                             const uint8_t *applied_sf,
+                             const uint8_t *applied_cr,
+                             const uint8_t *applied_tx_power)
 {
+    lora_reinit_for_tx(cfg, applied_sf, applied_cr, applied_tx_power);
+
     lora_frame_t f = {
         .master_id = cfg->master_id,
         .sequence  = sequence,
@@ -145,7 +181,8 @@ static void master_loop(const app_config_t *cfg,
                     printf("[MASTER][DEBUG] Enviando CMD_DEBUG seq=%u\n", sequence);
                     sent_green        = false;
                     sent_debug_manual = cfg->debug_manual_mode;
-                    send_lora_frame(cfg, CMD_DEBUG, sequence, 0);
+                    send_lora_frame(cfg, CMD_DEBUG, sequence, 0,
+                                     applied_sf, applied_cr, applied_tx_power);
                     lora_receive();
                     ack_tick  = xTaskGetTickCount();
                     dbg_tick  = xTaskGetTickCount();
@@ -175,7 +212,8 @@ static void master_loop(const app_config_t *cfg,
             printf("[MASTER] Enviando CMD_GREEN seq=%u\n", sequence);
             sent_green        = true;
             sent_debug_manual = false;
-            send_lora_frame(cfg, CMD_GREEN, sequence, (uint16_t)cfg->relay_duration_ms);
+            send_lora_frame(cfg, CMD_GREEN, sequence, (uint16_t)cfg->relay_duration_ms,
+                             applied_sf, applied_cr, applied_tx_power);
             lora_receive();
             ack_tick = xTaskGetTickCount();
             state    = MASTER_WAIT_ACK;
@@ -234,9 +272,11 @@ static void master_loop(const app_config_t *cfg,
             printf("[MASTER] Reintento %u/%u  seq=%u\n",
                    retries, cfg->max_retries, sequence);
             if (sent_green) {
-                send_lora_frame(cfg, CMD_GREEN, sequence, (uint16_t)cfg->relay_duration_ms);
+                send_lora_frame(cfg, CMD_GREEN, sequence, (uint16_t)cfg->relay_duration_ms,
+                                 applied_sf, applied_cr, applied_tx_power);
             } else {
-                send_lora_frame(cfg, CMD_DEBUG, sequence, 0);
+                send_lora_frame(cfg, CMD_DEBUG, sequence, 0,
+                                 applied_sf, applied_cr, applied_tx_power);
             }
             lora_receive();
             ack_tick = xTaskGetTickCount();
@@ -320,14 +360,8 @@ static void slave_loop(const app_config_t *cfg,
                    f->command, f->sequence, rssi, snr);
 
             /* Enviar ACK */
-            lora_frame_t ack = {
-                .master_id = cfg->master_id,
-                .sequence  = f->sequence,
-                .command   = CMD_ACK,
-                .relay_ms  = 0,
-            };
-            ack.checksum = lora_frame_checksum(&ack);
-            lora_send_packet((uint8_t *)&ack, sizeof(lora_frame_t));
+            send_lora_frame(cfg, CMD_ACK, f->sequence, 0,
+                             applied_sf, applied_cr, applied_tx_power);
             lora_receive();
 
             /* Registrar recepción */

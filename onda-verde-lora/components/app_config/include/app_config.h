@@ -16,10 +16,11 @@ typedef enum {
 #define APP_CFG_LORA_TX_POWER       17          /* dBm */
 #define APP_CFG_LORA_FREQUENCY      433000000L  /* Hz */
 
-#define APP_CFG_LOCK_TIMEOUT_MS     60000UL     /* lock-out master post-envío */
+#define APP_CFG_LOCK_TIMEOUT_MS     20000UL     /* lock-out master post-envío */
 #define APP_CFG_RELAY_DURATION_MS   10000UL     /* duración relé slave */
 #define APP_CFG_SLAVE_LOCKOUT_MS    15000UL     /* lock-out slave post-relay */
-#define APP_CFG_ACK_TIMEOUT_MS      1000UL      /* timeout espera ACK */
+#define APP_CFG_ACK_TIMEOUT_MS      1500UL      /* timeout espera ACK (incluye margen para
+                                                    el lora_recover() del slave antes de ACKear) */
 #define APP_CFG_MAX_RETRIES         3
 
 #define APP_CFG_MASTER_ID           0x01        /* ID del nodo master */

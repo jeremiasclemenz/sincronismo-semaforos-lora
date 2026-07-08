@@ -25,6 +25,9 @@ static int   s_packets       = 0;
 static bool  s_relay_active  = false;
 static char  s_state[32]     = "IDLE";
 static bool  s_debug_trigger = false; /* pedido de envío manual CMD_DEBUG, seteado por /debug_send */
+static bool  s_lora_alive    = true;  /* resultado del último lora_recover() antes de un envío */
+static int   s_lora_version  = 0;
+static int   s_lora_op_mode  = 0;
 
 /* Referencia a la config para exponer parámetros RF en /data */
 static const app_config_t *s_cfg = NULL;
@@ -57,6 +60,15 @@ void web_dashboard_set_relay_active(bool active)
 {
     if (dash_mutex) xSemaphoreTake(dash_mutex, portMAX_DELAY);
     s_relay_active = active;
+    if (dash_mutex) xSemaphoreGive(dash_mutex);
+}
+
+void web_dashboard_set_lora_diag(bool alive, int version, int op_mode)
+{
+    if (dash_mutex) xSemaphoreTake(dash_mutex, portMAX_DELAY);
+    s_lora_alive   = alive;
+    s_lora_version = version;
+    s_lora_op_mode = op_mode;
     if (dash_mutex) xSemaphoreGive(dash_mutex);
 }
 
@@ -291,13 +303,16 @@ static esp_err_t data_handler(httpd_req_t *req)
     int  rssi         = s_rssi;
     int  packets      = s_packets;
     bool relay_active = s_relay_active;
+    bool lora_alive   = s_lora_alive;
+    int  lora_version = s_lora_version;
+    int  lora_op_mode = s_lora_op_mode;
     char state[32];
     snprintf(state, sizeof(state), "%s", s_state);
     xSemaphoreGive(dash_mutex);
 
     uint32_t uptime_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
 
-    char json[288];
+    char json[384];
     snprintf(json, sizeof(json),
         "{"
         "\"rssi\":%d,"
@@ -310,7 +325,10 @@ static esp_err_t data_handler(httpd_req_t *req)
         "\"sf\":%d,"
         "\"bw\":%d,"
         "\"cr\":%d,"
-        "\"tx_power\":%d"
+        "\"tx_power\":%d,"
+        "\"lora_alive\":%s,"
+        "\"lora_version\":%d,"
+        "\"lora_op_mode\":%d"
         "}",
         rssi, packets, state,
         (unsigned long)uptime_ms,
@@ -320,7 +338,9 @@ static esp_err_t data_handler(httpd_req_t *req)
         s_cfg ? s_cfg->lora_sf      : 9,
         s_cfg ? s_cfg->lora_bw      : 7,
         s_cfg ? s_cfg->lora_cr      : 1,
-        s_cfg ? s_cfg->lora_tx_power : 17);
+        s_cfg ? s_cfg->lora_tx_power : 17,
+        lora_alive ? "true" : "false",
+        lora_version, lora_op_mode);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
@@ -437,6 +457,7 @@ static const char *evt_name(uint8_t e)
     if (e & EVT_RX_ERR)   return "RX_ERR";
     if (e & EVT_RELAY_ON) return "RELAY_ON";
     if (e & EVT_DEBUG)    return "DEBUG";
+    if (e & EVT_LORA_FAIL) return "LORA_FAIL";
     return "UNKNOWN";
 }
 

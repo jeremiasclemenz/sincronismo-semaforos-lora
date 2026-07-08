@@ -11,6 +11,7 @@
 #define EVT_RELAY_ON    0x10   /* Slave:  relé activado                   */
 #define EVT_DEBUG       0x20   /* Evento generado en modo DEBUG           */
 #define EVT_BOOT        0x40   /* Arranque del sistema                    */
+#define EVT_LORA_FAIL   0x80   /* lora_recover() falló antes de un envío  */
 
 /* ── Entrada del log ────────────────────────────────────────────────── */
 typedef struct {

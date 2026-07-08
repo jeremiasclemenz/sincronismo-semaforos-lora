@@ -14,6 +14,9 @@ void web_dashboard_set_rssi(int rssi);
 void web_dashboard_set_state(const char *state);
 void web_dashboard_inc_packets(void);
 void web_dashboard_set_relay_active(bool active);
+/* Diagnóstico del chip LoRa, actualizado por lora_reinit_for_tx() en cada
+ * intento de envío (ver lora_sync.c). */
+void web_dashboard_set_lora_diag(bool alive, int version, int op_mode);
 
 /* ── API de lectura (llamada desde lora_sync_task) ───────────────────── */
 /* Consume (lee y limpia) el pedido de envío manual de CMD_DEBUG hecho

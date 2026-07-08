@@ -82,6 +82,9 @@ static int _send_packet_lost = 0;
 static int _cr = 0;
 static int _sbw = 0;
 static int _sf = 0;
+static int _chip_version = 0;
+static int _chip_op_mode = 0;
+static int _chip_alive = 0;
 
 // use spi_device_transmit
 #define SPI_TRANSMIT 1
@@ -519,9 +522,60 @@ lora_disable_crc(void)
 }
 
 /**
+ * Hardware reset + register bring-up shared by lora_init() and
+ * lora_recover(): toggles RST, waits for REG_VERSION to confirm the chip
+ * is responding (with timeout), and reapplies the default registers
+ * (FIFO base addrs, LNA boost, MODEM_CONFIG_3, TX power). Does not touch
+ * the SPI bus, so it is safe to call repeatedly at runtime.
+ * @return 1 on success, 0 if the chip did not respond before the timeout.
+ */
+static int
+lora_chip_bringup(void)
+{
+   /*
+    * Perform hardware reset.
+    */
+   lora_reset();
+
+   /*
+    * Check version.
+    */
+   uint8_t version;
+   uint8_t i = 0;
+   while(i++ < TIMEOUT_RESET) {
+      version = lora_read_reg(REG_VERSION);
+      ESP_LOGD(TAG, "version=0x%02x", version);
+      if(version == 0x12) break;
+      vTaskDelay(2);
+   }
+   ESP_LOGD(TAG, "i=%d, TIMEOUT_RESET=%d", i, TIMEOUT_RESET);
+   if (i == TIMEOUT_RESET + 1) {
+      _chip_alive = 0;
+      return 0; // Illegal version
+   }
+
+   /*
+    * Default configuration.
+    */
+   lora_sleep();
+   lora_write_reg(REG_FIFO_RX_BASE_ADDR, 0);
+   lora_write_reg(REG_FIFO_TX_BASE_ADDR, 0);
+   lora_write_reg(REG_LNA, lora_read_reg(REG_LNA) | 0x03);
+   lora_write_reg(REG_MODEM_CONFIG_3, 0x04);
+   lora_set_tx_power(17);
+
+   lora_idle();
+
+   _chip_version = version;
+   _chip_op_mode = lora_read_reg(REG_OP_MODE);
+   _chip_alive   = 1;
+   return 1;
+}
+
+/**
  * Perform hardware initialization.
  */
-int 
+int
 lora_init(void)
 {
    esp_err_t ret;
@@ -543,7 +597,7 @@ lora_init(void)
       .quadhd_io_num = -1,
       .max_transfer_sz = 0
    };
-           
+
    //ret = spi_bus_initialize(VSPI_HOST, &bus, 0);
    ret = spi_bus_initialize(HOST_ID, &bus, SPI_DMA_CH_AUTO);
    assert(ret == ESP_OK);
@@ -560,38 +614,50 @@ lora_init(void)
    ret = spi_bus_add_device(HOST_ID, &dev, &_spi);
    assert(ret == ESP_OK);
 
-   /*
-    * Perform hardware reset.
-    */
-   lora_reset();
+   return lora_chip_bringup();
+}
 
-   /*
-    * Check version.
-    */
-   uint8_t version;
-   uint8_t i = 0;
-   while(i++ < TIMEOUT_RESET) {
-      version = lora_read_reg(REG_VERSION);
-      ESP_LOGD(TAG, "version=0x%02x", version);
-      if(version == 0x12) break;
-      vTaskDelay(2);
-   }
-   ESP_LOGD(TAG, "i=%d, TIMEOUT_RESET=%d", i, TIMEOUT_RESET);
-   if (i == TIMEOUT_RESET + 1) return 0; // Illegal version
-   //assert(i < TIMEOUT_RESET + 1); // at the end of the loop above, the max value i can reach is TIMEOUT_RESET + 1
+/**
+ * Reset and reconfigure the radio chip without touching the SPI bus.
+ * Use this at runtime (e.g. right before a TX) to recover from an
+ * isolated chip fault — brown-out from high-power TX, SPI glitch, etc. —
+ * that left the chip unresponsive. lora_init() must have been called
+ * once already to set up the SPI bus and GPIOs.
+ * @return 1 if the chip responded and was reconfigured, 0 if it is
+ *         still unresponsive after the internal timeout (~200ms worst case).
+ */
+int
+lora_recover(void)
+{
+   return lora_chip_bringup();
+}
 
-   /*
-    * Default configuration.
-    */
-   lora_sleep();
-   lora_write_reg(REG_FIFO_RX_BASE_ADDR, 0);
-   lora_write_reg(REG_FIFO_TX_BASE_ADDR, 0);
-   lora_write_reg(REG_LNA, lora_read_reg(REG_LNA) | 0x03);
-   lora_write_reg(REG_MODEM_CONFIG_3, 0x04);
-   lora_set_tx_power(17);
+/**
+ * Chip version (REG_VERSION) read during the last successful
+ * lora_init()/lora_recover(). 0x12 for the SX127x family.
+ */
+int
+lora_get_version(void)
+{
+   return _chip_version;
+}
 
-   lora_idle();
-   return 1;
+/**
+ * REG_OP_MODE read during the last successful lora_init()/lora_recover().
+ */
+int
+lora_get_op_mode(void)
+{
+   return _chip_op_mode;
+}
+
+/**
+ * Non-zero if the chip responded during the last lora_init()/lora_recover().
+ */
+int
+lora_is_alive(void)
+{
+   return _chip_alive;
 }
 
 /**
